@@ -51,6 +51,25 @@ curl -s -X POST http://127.0.0.1:5000/submit \
   -d '{"text": "The sun dipped below the horizon...", "creator_id": "test-user-1"}'
 ```
 
+A full `/submit` response is a single structured object carrying the attribution,
+both signal scores, the combined confidence, and the transparency label text:
+
+```json
+{
+  "content_id": "9982b5f0-9a4e-4ce9-b322-2192646ac3a2",
+  "attribution": "likely_human",
+  "confidence": 0.32,
+  "llm_score": 0.2,
+  "stylo_score": 0.501,
+  "label": {
+    "attribution": "likely_human",
+    "headline": "Human: Likely human-written",
+    "detail": "Our analysis found this reads as human-written, with the natural variation typical of a person's writing. This is an automated estimate and not a guarantee of authorship.",
+    "confidence": 0.32
+  }
+}
+```
+
 ## Architecture overview: the path a submission takes
 
 1. A creator sends `text` and `creator_id` to `POST /submit`.
