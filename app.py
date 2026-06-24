@@ -10,13 +10,13 @@ import uuid
 from flask import Flask, jsonify, request
 
 import db
-from scoring import attribution_for
-from signals import llm_signal
+from scoring import attribution_for, combine
+from signals import llm_signal, stylo_signal
 
 app = Flask(__name__)
 db.init_db()
 
-PLACEHOLDER_LABEL = "Label pending: full confidence scoring lands in Milestone 4."
+PLACEHOLDER_LABEL = "Label text lands in Milestone 5."
 
 
 @app.route("/submit", methods=["POST"])
@@ -31,11 +31,9 @@ def submit():
         return jsonify({"error": "creator_id is required"}), 400
 
     llm_score, rationale = llm_signal(text)
-
-    # Milestone 3: attribution comes from signal 1 alone; confidence and label are
-    # placeholders until the second signal and scoring arrive in Milestone 4.
-    attribution = attribution_for(llm_score)
-    confidence = llm_score
+    stylo_score, stylo_details = stylo_signal(text)
+    confidence = combine(llm_score, stylo_score)
+    attribution = attribution_for(confidence)
 
     content_id = str(uuid.uuid4())
     db.save_classification(
@@ -46,9 +44,10 @@ def submit():
             "attribution": attribution,
             "confidence": confidence,
             "llm_score": llm_score,
-            "stylo_score": None,
+            "stylo_score": stylo_score,
             "status": "classified",
             "rationale": rationale,
+            "stylo_details": stylo_details,
         }
     )
 
@@ -58,6 +57,7 @@ def submit():
             "attribution": attribution,
             "confidence": confidence,
             "llm_score": llm_score,
+            "stylo_score": stylo_score,
             "label": PLACEHOLDER_LABEL,
         }
     )

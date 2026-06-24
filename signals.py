@@ -10,6 +10,7 @@ Signal 2 (stylometric heuristics) is added in Milestone 4.
 import json
 import os
 import re
+import statistics
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -74,3 +75,61 @@ def llm_signal(text):
         return _parse(resp.choices[0].message.content)
     except Exception as exc:
         return 0.5, f"signal unavailable, defaulted to uncertain ({exc})"
+
+
+# --- Signal 2: stylometric heuristics (structural) ---------------------------
+
+_WORD_RE = re.compile(r"[A-Za-z']+")
+_SENT_RE = re.compile(r"[.!?]+")
+_PUNCT_RE = re.compile(r"[,.;:!?\"'()\-]")
+
+
+def _clamp(x):
+    return max(0.0, min(1.0, x))
+
+
+def stylo_signal(text):
+    """Return (stylo_score, details). stylo_score is AI-likelihood in 0..1.
+
+    Three sub-scores (1 = AI-like), weighted as in planning.md:
+      burstiness  std-dev of sentence lengths   low variance reads AI
+      diversity   type-token ratio              very high reads AI
+      punctuation marks per word                clusters mid (~0.12) reads AI
+
+    Texts under three sentences are low-evidence, so the raw score is blended
+    halfway toward 0.5 rather than asserting a structural verdict.
+    """
+    sentences = [s for s in _SENT_RE.split(text) if s.strip()]
+    words = _WORD_RE.findall(text.lower())
+    total_words = len(words)
+
+    if total_words == 0:
+        return 0.5, {"note": "no words to analyze"}
+
+    sent_lengths = [len(_WORD_RE.findall(s)) for s in sentences] or [total_words]
+    stdev = statistics.pstdev(sent_lengths) if len(sent_lengths) > 1 else 0.0
+    ttr = len(set(words)) / total_words
+    punct_density = len(_PUNCT_RE.findall(text)) / total_words
+
+    sub_burstiness = _clamp((8 - stdev) / 8)
+    sub_diversity = _clamp((ttr - 0.45) / 0.30)
+    sub_punct = _clamp(1 - abs(punct_density - 0.12) / 0.12)
+
+    raw = 0.5 * sub_burstiness + 0.3 * sub_diversity + 0.2 * sub_punct
+
+    low_evidence = len(sentences) < 3
+    score = (raw + 0.5) / 2 if low_evidence else raw
+
+    details = {
+        "sentence_count": len(sentences),
+        "word_count": total_words,
+        "sentence_length_stdev": round(stdev, 3),
+        "type_token_ratio": round(ttr, 3),
+        "punctuation_density": round(punct_density, 3),
+        "sub_burstiness": round(sub_burstiness, 3),
+        "sub_diversity": round(sub_diversity, 3),
+        "sub_punctuation": round(sub_punct, 3),
+        "raw_score": round(raw, 3),
+        "low_evidence": low_evidence,
+    }
+    return round(score, 3), details

@@ -21,3 +21,12 @@ def attribution_for(score):
     if score > HIGH_THRESHOLD:
         return "likely_ai"
     return "uncertain"
+
+
+def combine(llm_score, stylo_score):
+    """Combine the two signals into one AI-likelihood confidence in 0..1.
+
+    LLM is weighted higher because stylometrics is noisier on short or edge text.
+    """
+    confidence = LLM_WEIGHT * llm_score + STYLO_WEIGHT * stylo_score
+    return round(confidence, 3)

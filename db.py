@@ -97,7 +97,12 @@ def save_classification(record):
             record.get("llm_score"),
             record.get("stylo_score"),
             record["status"],
-            json.dumps({"rationale": record.get("rationale")}),
+            json.dumps(
+                {
+                    "rationale": record.get("rationale"),
+                    "stylo_details": record.get("stylo_details"),
+                }
+            ),
         ),
     )
     conn.commit()
