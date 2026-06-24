@@ -36,9 +36,13 @@ The API listens on `http://127.0.0.1:5000`.
 
 | Endpoint | Method | Accepts | Returns |
 |----------|--------|---------|---------|
-| `/submit` | POST | `{ text, creator_id }` | `content_id`, `attribution`, `confidence`, `llm_score`, `stylo_score`, `label` |
+| `/submit` | POST | `{ text, creator_id }` | `content_id`, `attribution`, `confidence`, `signals`, `label` |
 | `/appeal` | POST | `{ content_id, creator_reasoning }` | `content_id`, `status: under_review`, `message` |
 | `/log` | GET | none | `{ entries: [...] }`, newest first |
+| `/verify/challenge` | GET | `?creator_id=...` | one-time `code` + prompt (provenance certificate) |
+| `/verify` | POST | `{ creator_id, challenge_id, code, statement }` | issued `certificate` |
+| `/analytics` | GET | none | detection-pattern, appeal-rate, and extra metrics |
+| `/dashboard` | GET | none | HTML analytics view |
 
 `/submit` is rate limited and returns `400` on missing fields, `429` over the limit.
 `/appeal` returns `404` for an unknown `content_id`.
@@ -52,20 +56,25 @@ curl -s -X POST http://127.0.0.1:5000/submit \
 ```
 
 A full `/submit` response is a single structured object carrying the attribution,
-both signal scores, the combined confidence, and the transparency label text:
+the individual signal scores, the combined confidence, and the transparency label text:
 
 ```json
 {
   "content_id": "9982b5f0-9a4e-4ce9-b322-2192646ac3a2",
+  "content_type": "text",
   "attribution": "likely_human",
-  "confidence": 0.32,
-  "llm_score": 0.2,
-  "stylo_score": 0.501,
+  "confidence": 0.29,
+  "signals": {
+    "llm_score": 0.2,
+    "stylo_score": 0.501,
+    "lexical_score": 0.2,
+    "disagreement": false
+  },
   "label": {
     "attribution": "likely_human",
     "headline": "Human: Likely human-written",
     "detail": "Our analysis found this reads as human-written, with the natural variation typical of a person's writing. This is an automated estimate and not a guarantee of authorship.",
-    "confidence": 0.32
+    "confidence": 0.29
   }
 }
 ```
@@ -75,13 +84,14 @@ both signal scores, the combined confidence, and the transparency label text:
 1. A creator sends `text` and `creator_id` to `POST /submit`.
 2. The rate limiter checks the caller. Over the limit returns `429` before any work.
 3. Input is validated. Empty `text` or `creator_id` returns `400`.
-4. The text fans out to two independent detectors:
+4. The text fans out to independent detectors:
    - Signal 1, a Groq LLM classifier, returns an AI-likelihood and a short rationale.
    - Signal 2, a pure-Python stylometric analyzer, returns an AI-likelihood from
      measurable properties of the prose.
-5. The two scores are combined into one calibrated confidence (AI-likelihood, 0 to 1).
+   - Signal 3 (ensemble stretch), a lexical AI-marker counter, adds a third vote.
+5. The scores are combined into one calibrated confidence (AI-likelihood, 0 to 1).
 6. The confidence is mapped to an attribution category and a transparency label.
-7. The decision, both individual signal scores, and the combined confidence are
+7. The decision, the individual signal scores, and the combined confidence are
    written to a SQLite audit log, and the full result is returned to the caller.
 
 The appeal flow: a creator sends `content_id` and `creator_reasoning` to
@@ -95,9 +105,10 @@ The full architecture diagram for both flows is in
 
 ## Detection signals
 
-The system uses two genuinely distinct signals. One reads meaning, the other
+The system uses two genuinely distinct primary signals. One reads meaning, the other
 measures form. Their weaknesses do not overlap, which is what makes combining them
-more informative than either alone.
+more informative than either alone. A third lexical signal joins them in the ensemble
+(see Stretch features).
 
 ### Signal 1: Groq LLM classifier (semantic)
 
@@ -135,15 +146,18 @@ sentences are treated as low-evidence and the raw score is blended halfway towar
 
 ## Confidence scoring
 
-The two signals are combined with a fixed weighting:
+The signals are combined with fixed weights. The system runs a three-signal
+ensemble (the lexical signal is the stretch addition; see Stretch features):
 
 ```
-confidence = 0.6 * llm_score + 0.4 * stylo_score
+confidence = 0.5 * llm_score + 0.3 * stylo_score + 0.2 * lexical_score
 ```
 
-`confidence` is interpreted as an estimated probability that the text is
-AI-generated (0 is clearly human, 1 is clearly AI). The LLM is weighted higher
-because the stylometric signal is noisier on short and borderline text.
+(The original two-signal baseline was `0.6*llm + 0.4*stylo`; the ensemble keeps the
+LLM as the largest vote.) `confidence` is interpreted as an estimated probability
+that the text is AI-generated (0 is clearly human, 1 is clearly AI). The LLM is
+weighted highest because it is the most reliable signal; the lexical signal is
+weighted lowest because absence of AI markers is weak evidence of a human.
 
 **What the number means to a user.** 0.5 means the system genuinely cannot tell.
 The further from 0.5, the more the label commits. The confidence maps to three bands:
@@ -162,41 +176,39 @@ honest "we are not sure" instead of an accusation.
 inputs and confirmed they land where intuition says they should, with the two clear
 cases far apart and the two borderline cases in the middle:
 
-| Input | llm_score | stylo_score | confidence | result |
-|-------|-----------|-------------|------------|--------|
-| Clearly AI (formal essay boilerplate) | 0.70 | 0.65 | **0.682** | likely_ai |
-| Clearly human (casual ramen review) | 0.20 | 0.50 | **0.32** | likely_human |
-| Borderline (formal human economics) | 0.60 | 0.52 | **0.567** | uncertain |
-| Borderline (lightly edited AI) | 0.40 | 0.66 | **0.50** | uncertain |
+| Input | llm | stylo | lexical | confidence | result |
+|-------|-----|-------|---------|------------|--------|
+| Clearly AI (formal essay boilerplate) | 0.70 | 0.654 | 1.00 | **0.746** | likely_ai |
+| Clearly human (casual ramen review) | 0.20 | 0.501 | 0.20 | **0.29** | likely_human |
+| Borderline (formal human economics) | 0.60 | 0.517 | 0.20 | **0.495** | uncertain |
+| Borderline (lightly edited AI) | 0.40 | 0.655 | 0.20 | **0.436** | uncertain |
 
-When a borderline case looked off, I printed both signal scores separately to see
-which one was over-committing before adjusting.
+When a borderline case looked off, I printed the individual signal scores separately
+to see which one was over-committing before adjusting.
 
 ### Two example submissions with different confidence
 
-**Higher-confidence case (AI-generated essay), confidence 0.682:**
+**Higher-confidence case (AI-generated essay), confidence 0.746:**
 
 ```json
 {
   "attribution": "likely_ai",
-  "confidence": 0.682,
-  "llm_score": 0.7,
-  "stylo_score": 0.654
+  "confidence": 0.746,
+  "signals": { "llm_score": 0.7, "stylo_score": 0.654, "lexical_score": 1.0, "disagreement": false }
 }
 ```
 
-**Lower-confidence case (casual human review), confidence 0.32:**
+**Lower-confidence case (casual human review), confidence 0.29:**
 
 ```json
 {
   "attribution": "likely_human",
-  "confidence": 0.32,
-  "llm_score": 0.2,
-  "stylo_score": 0.501
+  "confidence": 0.29,
+  "signals": { "llm_score": 0.2, "stylo_score": 0.501, "lexical_score": 0.2, "disagreement": false }
 }
 ```
 
-The 0.36 gap between these two, with both signals moving in the same direction,
+The 0.456 gap between these two, with all three signals moving in the same direction,
 shows the score varies meaningfully rather than hovering around a constant.
 
 ## Transparency label
@@ -296,7 +308,7 @@ The `429` body:
 Every classification and every appeal is written to a structured SQLite log,
 exposed as JSON at `GET /log` (newest first). In production this would be behind
 auth; here it is open for documentation and grading. Each entry includes a
-timestamp, content id, attribution, the combined confidence, both individual signal
+timestamp, content id, attribution, the combined confidence, all individual signal
 scores, status, and either the LLM rationale (for classifications) or the appeal
 reasoning (for appeals).
 
@@ -309,56 +321,60 @@ original classification of the same `content_id`, which has flipped to
   "entries": [
     {
       "event_type": "appeal",
-      "content_id": "c5051e80-4d3d-4695-b58d-50280cb3227f",
+      "content_id": "9c094c1b-668b-460b-b436-1102c37596cd",
       "creator_id": "creator-formal",
-      "timestamp": "2026-06-24T18:25:34.355Z",
+      "timestamp": "2026-06-24T19:18:56.429Z",
       "attribution": "uncertain",
-      "confidence": 0.567,
+      "confidence": 0.495,
       "llm_score": 0.6,
       "stylo_score": 0.517,
+      "lexical_score": 0.2,
       "status": "under_review",
       "appeal_reasoning": "I wrote this myself. I am a non-native English speaker and my academic writing style can read as more formal than average."
     },
     {
       "event_type": "classification",
-      "content_id": "c5051e80-4d3d-4695-b58d-50280cb3227f",
+      "content_id": "9c094c1b-668b-460b-b436-1102c37596cd",
       "creator_id": "creator-formal",
-      "timestamp": "2026-06-24T18:25:34.312Z",
+      "timestamp": "2026-06-24T19:18:56.396Z",
       "attribution": "uncertain",
-      "confidence": 0.567,
+      "confidence": 0.495,
       "llm_score": 0.6,
       "stylo_score": 0.517,
+      "lexical_score": 0.2,
       "status": "classified"
     },
     {
       "event_type": "classification",
-      "content_id": "ad547427-0e4d-4aa1-b548-fae4f42d3275",
+      "content_id": "84f4b04c-3429-4607-9956-aa58baaa5839",
       "creator_id": "creator-ai",
-      "timestamp": "2026-06-24T18:25:33.292Z",
+      "timestamp": "2026-06-24T19:18:55.639Z",
       "attribution": "likely_ai",
-      "confidence": 0.682,
+      "confidence": 0.746,
       "llm_score": 0.7,
       "stylo_score": 0.654,
+      "lexical_score": 1.0,
       "status": "classified"
     },
     {
       "event_type": "classification",
-      "content_id": "9982b5f0-9a4e-4ce9-b322-2192646ac3a2",
+      "content_id": "02405485-09cb-412a-940c-2653c83536b2",
       "creator_id": "creator-human",
-      "timestamp": "2026-06-24T18:25:32.467Z",
+      "timestamp": "2026-06-24T19:18:55.051Z",
       "attribution": "likely_human",
-      "confidence": 0.32,
+      "confidence": 0.29,
       "llm_score": 0.2,
       "stylo_score": 0.501,
+      "lexical_score": 0.2,
       "status": "classified"
     }
   ]
 }
 ```
 
-Classification entries also carry the LLM `rationale` and a `stylo_details` block
-with the raw metrics (sentence-length std-dev, type-token ratio, punctuation
-density, the sub-scores) for transparency; those are omitted above for brevity.
+Classification entries also carry the LLM `rationale`, a `stylo_details` block with
+the raw stylometric metrics, and a `lexical_details` block with the marker hits, for
+transparency; those are omitted above for brevity.
 
 ## Known limitations
 
@@ -425,6 +441,108 @@ assignment is structured around. Two specific instances:
    landed outside the bands and the borderline cases inside. I also added the
    low-evidence handling for short text (blending toward 0.5 under three sentences),
    which the edge-case analysis called for but the generated draft had left out.
+
+## Stretch features
+
+All four stretch features are implemented. Each is documented here with how it works
+and sample output.
+
+### 1. Ensemble detection (third signal + weighted voting)
+
+The text pipeline runs three distinct signals, not two. The third is a **lexical
+AI-marker** signal that counts formulaic phrases and transitions ("it is important
+to note", "furthermore", "paradigm shift", "stakeholders", "responsible deployment",
+and similar). It is genuinely distinct: not the LLM's semantic judgment and not the
+stylometric rhythm, but specific phrase-level fingerprints.
+
+- **Weighting:** `confidence = 0.5*llm + 0.3*stylo + 0.2*lexical`. The LLM keeps the
+  largest vote as the most reliable signal; lexical is smallest because the absence
+  of markers is weak evidence of a human.
+- **Conflict resolution:** disagreement is resolved by the weighted average landing
+  mid-range, which the wide uncertain band then reports honestly instead of forcing a
+  side. The response exposes all three scores and a `disagreement` flag (true when the
+  spread between the three is 0.4 or more), so a reviewer can see when the signals split.
+
+The `/submit` response shows each signal alongside the ensemble result:
+
+```json
+{
+  "attribution": "likely_ai",
+  "confidence": 0.746,
+  "signals": { "llm_score": 0.7, "stylo_score": 0.654, "lexical_score": 1.0, "disagreement": false }
+}
+```
+
+A clearly human review returns `confidence 0.273` with `llm_score 0.2, stylo_score
+0.444, lexical_score 0.2`, so all three move together.
+
+### 2. Provenance certificate (Verified Human Creator)
+
+A creator can earn a "Verified Human Creator" credential, separate from per-content
+detection. The verification step is a challenge-response:
+
+1. `GET /verify/challenge?creator_id=...` issues a one-time code and a writing prompt.
+2. The creator replies with `POST /verify` including the code and an original
+   statement (at least 40 characters, must differ from the code). This is a
+   lightweight liveness/authorship check standing in for a real identity flow.
+3. On success a certificate is stored for that `creator_id`.
+
+When a verified creator submits content, the `/submit` response carries a
+`certificate` block and the label gains a `badge` of "Verified Human Creator", which
+is visibly distinct from the standard transparency label because the badge is about
+the creator's verified identity, not the content's attribution:
+
+```json
+{
+  "attribution": "uncertain",
+  "label": { "headline": "?: Uncertain origin", "badge": "Verified Human Creator" },
+  "certificate": { "certificate_id": "ee59ceb1-...", "creator_id": "creator-verified", "issued_at": "..." }
+}
+```
+
+### 3. Analytics dashboard
+
+`GET /analytics` returns JSON metrics and `GET /dashboard` renders them as a simple
+HTML view. It reports more than three metrics: the detection pattern (count and ratio
+of likely AI / uncertain / likely human), the appeal rate, plus average confidence and
+number of verified creators.
+
+```json
+{
+  "total_submissions": 6,
+  "detection_pattern": {
+    "likely_ai":    { "count": 2, "ratio": 0.333 },
+    "uncertain":    { "count": 2, "ratio": 0.333 },
+    "likely_human": { "count": 2, "ratio": 0.333 }
+  },
+  "appeal_rate": 0.167,
+  "average_confidence": 0.505,
+  "verified_creators": 1
+}
+```
+
+### 4. Multi-modal support (image metadata)
+
+`/submit` accepts a second content type. Send `content_type: "image_metadata"` with a
+`metadata` object (`caption`, `software`, `camera_make`, `has_exif`) instead of `text`,
+and it flows through the same scoring, label, audit-log, and appeal pipeline.
+
+- **Signals used:** a metadata heuristic (a known AI-generator software tag such as
+  Midjourney or Stable Diffusion, or missing camera EXIF, reads as AI; a real camera
+  make with EXIF reads as authentic) combined with the LLM signal run on the caption.
+  `confidence = 0.6*metadata + 0.4*caption`.
+
+```bash
+# AI-generated image
+curl -s -X POST http://127.0.0.1:5000/submit -H "Content-Type: application/json" \
+  -d '{"content_type":"image_metadata","creator_id":"c1","metadata":{"caption":"a hyperrealistic cyberpunk city","software":"Midjourney","camera_make":"","has_exif":false}}'
+# -> attribution likely_ai, confidence 0.85 (metadata_score 0.95, caption_score 0.7)
+
+# Real photo
+curl -s -X POST http://127.0.0.1:5000/submit -H "Content-Type: application/json" \
+  -d '{"content_type":"image_metadata","creator_id":"c1","metadata":{"caption":"my dog at the beach","software":"","camera_make":"Canon","has_exif":true}}'
+# -> attribution likely_human, confidence 0.22 (metadata_score 0.1, caption_score 0.4)
+```
 
 ## Portfolio walkthrough
 

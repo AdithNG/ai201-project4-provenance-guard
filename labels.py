@@ -39,13 +39,26 @@ _LABELS = {
 }
 
 
-def generate_label(confidence):
-    """Return a label dict {attribution, headline, detail, confidence}."""
+def generate_label(confidence, verified=False):
+    """Return a label dict {attribution, headline, detail, confidence, badge?}.
+
+    When the creator holds a Verified Human Creator certificate, a separate badge is
+    attached. The badge is about the creator's verified identity and is visibly
+    distinct from the content's transparency label.
+    """
     attribution = attribution_for(confidence)
     base = _LABELS[attribution]
-    return {
+    label = {
         "attribution": attribution,
         "headline": f"{base['icon']}: {base['headline']}",
         "detail": base["detail"],
         "confidence": confidence,
     }
+    if verified:
+        label["badge"] = "Verified Human Creator"
+        label["badge_detail"] = (
+            "This creator completed human verification. The badge attests to the "
+            "creator's verified identity and is separate from the automated "
+            "attribution estimate above."
+        )
+    return label

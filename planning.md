@@ -340,3 +340,55 @@ and label wording we finalize in Milestone 2.
 - `/submit` is rate-limited; returns `400` on bad input, `429` over limit.
 - `/appeal` returns `404` if `content_id` is unknown.
 - `/log` is open here for grading/documentation; would require auth in production.
+
+---
+
+## Stretch Features (plan)
+
+All four stretch features are implemented. Plan and design below; see README for
+the built behavior.
+
+### 1. Ensemble detection (3rd signal + voting)
+Add a third distinct signal and move from a 2-signal blend to a weighted ensemble.
+- **Signal 3: lexical AI-marker density.** Counts formulaic AI-tell phrases and
+  transitions ("it is important to note", "furthermore", "paradigm shift",
+  "stakeholders", "leverage", "in conclusion", and similar). Distinct from the
+  other two: not semantic judgment (LLM) and not structural rhythm (stylometrics),
+  but specific phrase-level fingerprints. Output `lexical_score` in 0..1.
+- **Weighting / voting:** `confidence = 0.5*llm + 0.3*stylo + 0.2*lexical`. The LLM
+  keeps the largest vote because it is the most reliable; lexical is smallest because
+  absence of markers is weak evidence of a human.
+- **Conflict resolution:** disagreement is resolved by the weighted average landing
+  mid-range, which the wide uncertain band (0.35 to 0.65) then reports honestly as
+  "uncertain" rather than forcing a side. The response also exposes all three scores
+  and a `disagreement` flag when their spread is large, so a reviewer can see the
+  signals split.
+
+### 2. Provenance certificate (verified human)
+A creator can earn a "Verified Human Creator" credential through a challenge step,
+separate from per-content detection.
+- **Verification step:** `GET /verify/challenge?creator_id=...` issues a one-time
+  code and a writing prompt. The creator replies via `POST /verify` with the code
+  and an original free-text statement (min length, must differ from the code). This
+  is a lightweight liveness/authorship check standing in for a real KYC flow.
+- **Credential:** on success a certificate (id + issue time) is stored for that
+  `creator_id`.
+- **Display:** when a verified creator submits content, the `/submit` response
+  carries a `certificate` block and the label gains a `badge` of
+  "Verified Human Creator", visibly distinct from the standard transparency label
+  (which is about the content, not the creator).
+
+### 3. Analytics dashboard
+`GET /analytics` (JSON) and `GET /dashboard` (HTML) expose at least three metrics:
+- detection pattern: count and ratio of `likely_ai` / `uncertain` / `likely_human`,
+- appeal rate: appeals divided by total submissions,
+- plus average confidence and number of verified creators.
+
+### 4. Multi-modal support (image metadata)
+`/submit` accepts `content_type: "image_metadata"` with a `metadata` object
+(`caption`, `software`, `camera_make`, `has_exif`) instead of `text`.
+- **Signals used:** a metadata heuristic (known AI-generator software tags or missing
+  camera EXIF read as AI; a real camera make with EXIF reads as authentic) combined
+  with the LLM signal run on the caption text. `confidence = 0.6*metadata + 0.4*caption`.
+- The result flows through the same scoring, label, audit-log, and appeal pipeline as
+  text, returning the same response shape.

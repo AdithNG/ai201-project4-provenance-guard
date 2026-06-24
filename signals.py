@@ -133,3 +133,99 @@ def stylo_signal(text):
         "low_evidence": low_evidence,
     }
     return round(score, 3), details
+
+
+# --- Signal 3: lexical AI-marker density (ensemble stretch) -------------------
+
+# Formulaic phrases and transitions that show up disproportionately in AI prose.
+_AI_MARKERS = [
+    "it is important to note",
+    "it's important to note",
+    "it is worth noting",
+    "in conclusion",
+    "in summary",
+    "furthermore",
+    "moreover",
+    "additionally",
+    "paradigm shift",
+    "delve",
+    "navigate the complexities",
+    "in today's",
+    "plays a crucial role",
+    "plays a significant role",
+    "a testament to",
+    "in the realm of",
+    "tapestry",
+    "underscores",
+    "multifaceted",
+    "stakeholders",
+    "leverage",
+    "seamless",
+    "ever-evolving",
+    "landscape",
+    "foster",
+    "holistic",
+    "transformative",
+    "robust",
+    "it is essential to",
+    "equally essential",
+    "responsible deployment",
+]
+
+
+def lexical_signal(text):
+    """Return (lexical_score, details). Score is AI-likelihood in 0..1.
+
+    Counts AI-marker phrases. Absence of markers is weak evidence of a human, so a
+    clean text floors at 0.2 rather than 0; each marker adds 0.2 up to 1.0.
+    """
+    low = text.lower()
+    hits = [m for m in _AI_MARKERS if m in low]
+    score = _clamp(0.2 + 0.2 * len(hits))
+    return round(score, 3), {"marker_hits": len(hits), "markers": hits}
+
+
+# --- Multimodal: image-metadata signal (stretch) -----------------------------
+
+_AI_IMAGE_TOOLS = [
+    "stable diffusion",
+    "midjourney",
+    "dall-e",
+    "dalle",
+    "dall e",
+    "firefly",
+    "imagen",
+    "flux",
+    "leonardo",
+    "nightcafe",
+    "gan",
+]
+
+
+def metadata_signal(metadata):
+    """Return (meta_score, details) for image metadata. AI-likelihood in 0..1.
+
+    metadata: {caption, software, camera_make, has_exif}
+      - a known AI-generator software tag reads as AI
+      - a real camera make with EXIF reads as authentic
+      - missing EXIF and no camera leans AI, but only weakly
+    """
+    software = (metadata.get("software") or "").lower()
+    camera_make = (metadata.get("camera_make") or "").strip()
+    has_exif = bool(metadata.get("has_exif"))
+
+    if any(tool in software for tool in _AI_IMAGE_TOOLS):
+        score, reason = 0.95, f"AI generator tag in software: {software}"
+    elif camera_make and has_exif:
+        score, reason = 0.1, f"real camera EXIF present: {camera_make}"
+    elif not has_exif and not camera_make:
+        score, reason = 0.65, "no camera make and no EXIF"
+    else:
+        score, reason = 0.5, "mixed or incomplete metadata"
+
+    return score, {
+        "software": software or None,
+        "camera_make": camera_make or None,
+        "has_exif": has_exif,
+        "reason": reason,
+    }
