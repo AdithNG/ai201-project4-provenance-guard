@@ -8,18 +8,29 @@ build on this.
 import uuid
 
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 import db
-from scoring import attribution_for, combine
+from labels import generate_label
+from scoring import combine
 from signals import llm_signal, stylo_signal
 
 app = Flask(__name__)
 db.init_db()
 
-PLACEHOLDER_LABEL = "Label text lands in Milestone 5."
+# Rate limiting. See README for the reasoning behind these specific values.
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
+SUBMIT_LIMITS = "10 per minute;100 per day"
 
 
 @app.route("/submit", methods=["POST"])
+@limiter.limit(SUBMIT_LIMITS)
 def submit():
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
@@ -33,7 +44,7 @@ def submit():
     llm_score, rationale = llm_signal(text)
     stylo_score, stylo_details = stylo_signal(text)
     confidence = combine(llm_score, stylo_score)
-    attribution = attribution_for(confidence)
+    label = generate_label(confidence)
 
     content_id = str(uuid.uuid4())
     db.save_classification(
@@ -41,7 +52,7 @@ def submit():
             "content_id": content_id,
             "creator_id": creator_id,
             "text": text,
-            "attribution": attribution,
+            "attribution": label["attribution"],
             "confidence": confidence,
             "llm_score": llm_score,
             "stylo_score": stylo_score,
@@ -54,11 +65,35 @@ def submit():
     return jsonify(
         {
             "content_id": content_id,
-            "attribution": attribution,
+            "attribution": label["attribution"],
             "confidence": confidence,
             "llm_score": llm_score,
             "stylo_score": stylo_score,
-            "label": PLACEHOLDER_LABEL,
+            "label": label,
+        }
+    )
+
+
+@app.route("/appeal", methods=["POST"])
+def appeal():
+    data = request.get_json(silent=True) or {}
+    content_id = (data.get("content_id") or "").strip()
+    creator_reasoning = (data.get("creator_reasoning") or "").strip()
+
+    if not content_id:
+        return jsonify({"error": "content_id is required"}), 400
+    if not creator_reasoning:
+        return jsonify({"error": "creator_reasoning is required"}), 400
+
+    updated = db.file_appeal(content_id, creator_reasoning)
+    if updated is None:
+        return jsonify({"error": "unknown content_id"}), 404
+
+    return jsonify(
+        {
+            "content_id": content_id,
+            "status": "under_review",
+            "message": "Appeal received. This content is now under review.",
         }
     )
 
@@ -66,6 +101,20 @@ def submit():
 @app.route("/log", methods=["GET"])
 def log():
     return jsonify({"entries": db.get_log()})
+
+
+@app.errorhandler(429)
+def rate_limit_exceeded(error):
+    return (
+        jsonify(
+            {
+                "error": "rate limit exceeded",
+                "limit": SUBMIT_LIMITS,
+                "message": "Too many submissions. Please slow down and try again later.",
+            }
+        ),
+        429,
+    )
 
 
 if __name__ == "__main__":
