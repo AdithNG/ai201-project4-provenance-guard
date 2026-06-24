@@ -428,7 +428,10 @@ assignment is structured around. Two specific instances:
 
 ## Portfolio walkthrough
 
-A short walkthrough video is included with the submission, giving a quick tour of
-the system running end to end and a few of the design decisions. The detailed
-evidence (audit-log sample, rate-limit behavior, label variants, appeal handling)
-lives in this README and the source.
+A short walkthrough video gives a quick tour of the system running end to end and a
+few of the design decisions:
+
+https://www.loom.com/share/99c0a8feaf3846938eea23fb0f761d64
+
+The detailed evidence (audit-log sample, rate-limit behavior, label variants, appeal
+handling) lives in this README and the source.
